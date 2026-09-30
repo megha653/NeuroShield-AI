@@ -3,6 +3,7 @@ import math
 from pathlib import Path
 
 import joblib
+import numpy as np
 import pandas as pd
 import streamlit as st
 import tensorflow as tf
@@ -11,6 +12,8 @@ from tensorflow.keras.preprocessing.text import tokenizer_from_json
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 
 from multilingual import prepare_multilingual_message
+from features import extract_features
+from monitoring import log_prediction, get_monitoring_stats
 
 
 # ============================================================
@@ -26,16 +29,27 @@ st.set_page_config(
 
 BASE = Path(__file__).parent
 
+# Classical ML
 ML_MODEL_PATH = BASE / "models" / "text_model.joblib"
 TFIDF_PATH = BASE / "models" / "tfidf.joblib"
 BEST_MODEL_PATH = BASE / "models" / "best_model.txt"
 
+# Deep Learning
 DL_MODEL_PATH = BASE / "models" / "deep_text_model.keras"
 TOKENIZER_PATH = BASE / "models" / "deep_tokenizer.json"
 CONFIG_PATH = BASE / "models" / "deep_config.json"
 
+# Unsupervised Learning
+ANOMALY_MODEL_PATH = BASE / "models" / "anomaly_model.joblib"
+ANOMALY_SCALER_PATH = BASE / "models" / "anomaly_scaler.joblib"
+
+# Artifacts
 ML_RESULTS_PATH = BASE / "artifacts" / "model_comparison.csv"
 DL_RESULTS_PATH = BASE / "artifacts" / "deep_model_results.csv"
+STATS_PATH = BASE / "artifacts" / "dataset_statistics.csv"
+
+CLASS_CHART_PATH = BASE / "artifacts" / "class_distribution.png"
+LENGTH_CHART_PATH = BASE / "artifacts" / "message_length_distribution.png"
 
 
 # ============================================================
@@ -45,16 +59,6 @@ DL_RESULTS_PATH = BASE / "artifacts" / "deep_model_results.csv"
 st.markdown(
     """
 <style>
-
-:root {
-    --bg: #fafafa;
-    --surface: #ffffff;
-    --text: #171717;
-    --muted: #737373;
-    --border: #e8e8e8;
-    --accent: #ff3f6c;
-    --accent-soft: #fff1f4;
-}
 
 .stApp {
     background: #fafafa;
@@ -72,7 +76,7 @@ st.markdown(
 }
 
 
-/* NAV */
+/* NAVIGATION */
 
 .nav {
     display: flex;
@@ -108,7 +112,7 @@ st.markdown(
 /* HERO */
 
 .hero {
-    padding: 75px 0 55px 0;
+    padding: 72px 0 55px 0;
     max-width: 850px;
 }
 
@@ -117,7 +121,6 @@ st.markdown(
     font-size: 12px;
     font-weight: 800;
     letter-spacing: 1.8px;
-    text-transform: uppercase;
     margin-bottom: 18px;
 }
 
@@ -133,7 +136,7 @@ st.markdown(
     font-size: 19px;
     line-height: 1.65;
     color: #686868;
-    max-width: 720px;
+    max-width: 730px;
     margin-top: 22px;
 }
 
@@ -144,7 +147,7 @@ st.markdown(
 }
 
 
-/* SECTION */
+/* SECTIONS */
 
 .section {
     margin-top: 55px;
@@ -155,7 +158,6 @@ st.markdown(
     font-weight: 800;
     color: #ff3f6c;
     letter-spacing: 1.5px;
-    text-transform: uppercase;
     margin-bottom: 7px;
 }
 
@@ -183,7 +185,6 @@ st.markdown(
     border-radius: 12px;
     padding: 16px 18px;
     margin-top: 18px;
-    margin-bottom: 12px;
 }
 
 .language-label {
@@ -222,7 +223,6 @@ st.markdown(
     font-size: 11px;
     font-weight: 700;
     letter-spacing: 1px;
-    text-transform: uppercase;
 }
 
 .card-value {
@@ -288,7 +288,30 @@ st.markdown(
 }
 
 
-/* SIGNAL */
+/* ANOMALY */
+
+.anomaly-box {
+    background: #fff9e8;
+    border: 1px solid #f2dfaa;
+    border-radius: 12px;
+    padding: 16px 18px;
+    margin-top: 18px;
+}
+
+.anomaly-title {
+    color: #765a0b;
+    font-size: 13px;
+    font-weight: 750;
+}
+
+.anomaly-copy {
+    color: #806c37;
+    font-size: 12px;
+    margin-top: 4px;
+}
+
+
+/* SIGNALS */
 
 .signal {
     display: inline-block;
@@ -303,20 +326,16 @@ st.markdown(
 }
 
 
-/* METRIC CARDS */
+/* MODEL LAB */
 
-.stat-number {
-    font-size: 29px;
-    font-weight: 800;
-    letter-spacing: -1px;
-    color: #171717;
-    margin-top: 8px;
-}
-
-.stat-label {
-    font-size: 12px;
-    color: #858585;
-    margin-top: 4px;
+.lab-note {
+    background: #ffffff;
+    border: 1px solid #e8e8e8;
+    border-radius: 12px;
+    padding: 18px;
+    color: #696969;
+    font-size: 13px;
+    line-height: 1.6;
 }
 
 
@@ -390,12 +409,6 @@ div.stButton > button[kind="primary"]:hover {
     border-radius: 12px;
 }
 
-[data-testid="stDataFrame"] {
-    border: 1px solid #e8e8e8;
-    border-radius: 12px;
-    overflow: hidden;
-}
-
 
 /* FOOTER */
 
@@ -414,7 +427,7 @@ div.stButton > button[kind="primary"]:hover {
 
 
 # ============================================================
-# LOAD MODELS
+# VERIFY FILES
 # ============================================================
 
 required_files = [
@@ -423,6 +436,8 @@ required_files = [
     DL_MODEL_PATH,
     TOKENIZER_PATH,
     CONFIG_PATH,
+    ANOMALY_MODEL_PATH,
+    ANOMALY_SCALER_PATH,
 ]
 
 missing = [
@@ -433,11 +448,15 @@ missing = [
 
 if missing:
     st.error(
-        "Missing model files: "
+        "Missing required model files: "
         + ", ".join(missing)
     )
     st.stop()
 
+
+# ============================================================
+# LOAD MODELS
+# ============================================================
 
 @st.cache_resource
 def load_models():
@@ -460,10 +479,18 @@ def load_models():
         )
     )
 
-    config = json.loads(
+    dl_config = json.loads(
         CONFIG_PATH.read_text(
             encoding="utf-8"
         )
+    )
+
+    anomaly_model = joblib.load(
+        ANOMALY_MODEL_PATH
+    )
+
+    anomaly_scaler = joblib.load(
+        ANOMALY_SCALER_PATH
     )
 
     return (
@@ -471,7 +498,9 @@ def load_models():
         vectorizer,
         dl_model,
         tokenizer,
-        config,
+        dl_config,
+        anomaly_model,
+        anomaly_scaler,
     )
 
 
@@ -481,6 +510,8 @@ def load_models():
     dl_model,
     tokenizer,
     dl_config,
+    anomaly_model,
+    anomaly_scaler,
 ) = load_models()
 
 
@@ -494,7 +525,7 @@ best_ml = (
 
 
 # ============================================================
-# HELPERS
+# PREDICTION FUNCTIONS
 # ============================================================
 
 def sigmoid(value):
@@ -595,6 +626,46 @@ def dl_predict(message):
     )
 
 
+def anomaly_predict(message):
+
+    engineered = np.array(
+        [
+            extract_features(
+                message
+            )
+        ]
+    )
+
+    scaled = anomaly_scaler.transform(
+        engineered
+    )
+
+    raw_prediction = int(
+        anomaly_model.predict(
+            scaled
+        )[0]
+    )
+
+    anomaly_score = float(
+        anomaly_model.decision_function(
+            scaled
+        )[0]
+    )
+
+    # Isolation Forest:
+    # 1  = normal/inlier
+    # -1 = anomaly/outlier
+
+    is_anomaly = int(
+        raw_prediction == -1
+    )
+
+    return (
+        is_anomaly,
+        anomaly_score,
+    )
+
+
 def get_evidence(features):
 
     if not hasattr(
@@ -655,7 +726,7 @@ if "sample_message" not in st.session_state:
 
 
 # ============================================================
-# NAV
+# NAVIGATION
 # ============================================================
 
 st.markdown(
@@ -665,7 +736,7 @@ st.markdown(
     'NEUROSHIELD'
     '</div>'
     '<div class="nav-right">'
-    'MULTILINGUAL ML + DEEP LEARNING'
+    'ML / DEEP LEARNING / ANOMALY INTELLIGENCE'
     '</div>'
     '</div>',
     unsafe_allow_html=True,
@@ -679,20 +750,20 @@ st.markdown(
 st.markdown(
     '<div class="hero">'
     '<div class="eyebrow">'
-    'MULTILINGUAL AI MESSAGE INTELLIGENCE'
+    'AI MESSAGE INTELLIGENCE'
     '</div>'
     '<div class="hero-title">'
     'Know what you\'re<br>'
     'about to trust.'
     '</div>'
     '<div class="hero-copy">'
-    'NeuroShield analyses suspicious messages across languages '
-    'using language detection, translation-assisted inference, '
-    'classical machine learning and deep learning.'
+    'NeuroShield combines classical machine learning, '
+    'deep learning and unsupervised anomaly detection '
+    'to analyse suspicious messages across languages.'
     '</div>'
     '<div class="hero-note">'
-    'Scammers went multilingual. '
-    'It seemed rude not to keep up.'
+    'Because “urgent account verification” deserves '
+    'a little more scrutiny than blind optimism.'
     '</div>'
     '</div>',
     unsafe_allow_html=True,
@@ -700,7 +771,7 @@ st.markdown(
 
 
 # ============================================================
-# EXAMPLES
+# QUICK TEST
 # ============================================================
 
 st.markdown(
@@ -708,10 +779,10 @@ st.markdown(
     'QUICK TEST'
     '</div>'
     '<div class="section-title">'
-    'Don\'t have a suspicious message handy?'
+    'Try a message.'
     '</div>'
     '<div class="section-copy">'
-    'Lucky you. Borrow one of ours.'
+    'Use an example or paste your own.'
     '</div>',
     unsafe_allow_html=True,
 )
@@ -723,7 +794,7 @@ c1, c2, c3, c4 = st.columns(4)
 with c1:
 
     if st.button(
-        "English",
+        "Bank alert",
         use_container_width=True,
     ):
 
@@ -736,6 +807,19 @@ with c1:
 with c2:
 
     if st.button(
+        "Prize message",
+        use_container_width=True,
+    ):
+
+        st.session_state.sample_message = (
+            "Congratulations! You have won a cash prize. "
+            "Click now to claim your reward."
+        )
+
+
+with c3:
+
+    if st.button(
         "Hindi",
         use_container_width=True,
     ):
@@ -743,19 +827,6 @@ with c2:
         st.session_state.sample_message = (
             "आपका बैंक खाता बंद कर दिया गया है। "
             "तुरंत अपनी पहचान सत्यापित करें।"
-        )
-
-
-with c3:
-
-    if st.button(
-        "Bengali",
-        use_container_width=True,
-    ):
-
-        st.session_state.sample_message = (
-            "আপনার ব্যাংক অ্যাকাউন্ট বন্ধ করা হয়েছে। "
-            "এখনই আপনার পরিচয় যাচাই করুন।"
         )
 
 
@@ -785,8 +856,8 @@ st.markdown(
     'Check a message.'
     '</div>'
     '<div class="section-copy">'
-    'Paste an SMS or short message in your language. '
-    'NeuroShield will detect the language automatically.'
+    'Paste an SMS or short message. '
+    'Language detection happens automatically.'
     '</div>'
     '</div>',
     unsafe_allow_html=True,
@@ -828,7 +899,7 @@ if analyse:
     else:
 
         # ----------------------------------------------------
-        # MULTILINGUAL LAYER
+        # MULTILINGUAL PREPROCESSING
         # ----------------------------------------------------
 
         language_info = (
@@ -851,28 +922,44 @@ if analyse:
 
 
         # ----------------------------------------------------
-        # LANGUAGE DISPLAY
+        # LANGUAGE INFORMATION
         # ----------------------------------------------------
 
         if language_info[
             "was_translated"
         ]:
 
-            st.markdown(
-                '<div class="language-box">'
-                '<div class="language-label">'
-                'LANGUAGE DETECTED'
-                '</div>'
-                f'<div class="language-value">'
-                f'{detected_language}'
-                '</div>'
-                '<div class="language-note">'
-                'Translated into English before '
-                'ML and deep-learning analysis.'
-                '</div>'
-                '</div>',
-                unsafe_allow_html=True,
+            language_note = (
+                "Translated into English before "
+                "model inference."
             )
+
+        else:
+
+            language_note = (
+                "No translation required."
+            )
+
+
+        st.markdown(
+            '<div class="language-box">'
+            '<div class="language-label">'
+            'LANGUAGE DETECTED'
+            '</div>'
+            f'<div class="language-value">'
+            f'{detected_language}'
+            '</div>'
+            f'<div class="language-note">'
+            f'{language_note}'
+            '</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+
+        if language_info[
+            "was_translated"
+        ]:
 
             with st.expander(
                 "View translated text"
@@ -882,26 +969,9 @@ if analyse:
                     analysis_text
                 )
 
-        else:
-
-            st.markdown(
-                '<div class="language-box">'
-                '<div class="language-label">'
-                'LANGUAGE DETECTED'
-                '</div>'
-                f'<div class="language-value">'
-                f'{detected_language}'
-                '</div>'
-                '<div class="language-note">'
-                'No translation was required.'
-                '</div>'
-                '</div>',
-                unsafe_allow_html=True,
-            )
-
 
         # ----------------------------------------------------
-        # MODEL PREDICTIONS
+        # THREE ANALYSIS ENGINES
         # ----------------------------------------------------
 
         (
@@ -922,6 +992,30 @@ if analyse:
         )
 
 
+        (
+            anomaly_prediction,
+            anomaly_score,
+        ) = anomaly_predict(
+            analysis_text
+        )
+
+
+        # ----------------------------------------------------
+        # MONITORING LOG
+        # ----------------------------------------------------
+
+        log_prediction(
+            detected_language,
+            ml_prediction,
+            dl_prediction,
+            anomaly_prediction,
+        )
+
+
+        # ----------------------------------------------------
+        # CONSENSUS
+        # ----------------------------------------------------
+
         both_suspicious = (
             ml_prediction == 1
             and dl_prediction == 1
@@ -934,7 +1028,7 @@ if analyse:
 
 
         # ----------------------------------------------------
-        # VERDICT
+        # RESULT
         # ----------------------------------------------------
 
         st.markdown(
@@ -961,10 +1055,10 @@ if analyse:
                 'We\'d think twice before clicking.'
                 '</div>'
                 '<div class="verdict-copy">'
-                'Both models found patterns associated '
-                'with suspicious or spam messaging. '
-                'Verify the sender through another channel '
-                'before taking action.'
+                'Both supervised models found patterns '
+                'associated with suspicious messaging. '
+                'Verify the sender independently before '
+                'taking action.'
                 '</div>'
                 '</div>',
                 unsafe_allow_html=True,
@@ -982,9 +1076,9 @@ if analyse:
                 'Nothing particularly dramatic here.'
                 '</div>'
                 '<div class="verdict-copy">'
-                'Both models classified this as more similar '
-                'to normal messaging. That is not a guarantee '
-                'of safety — common sense is still supported.'
+                'Both supervised models classified this '
+                'as more similar to normal messaging. '
+                'That is not a guarantee of safety.'
                 '</div>'
                 '</div>',
                 unsafe_allow_html=True,
@@ -999,7 +1093,7 @@ if analyse:
                 'MODEL DISAGREEMENT'
                 '</div>'
                 '<div class="verdict-title">'
-                'The machines are arguing.'
+                'The models disagree.'
                 '</div>'
                 '<div class="verdict-copy">'
                 'The classical and deep-learning models '
@@ -1012,21 +1106,41 @@ if analyse:
 
 
         # ----------------------------------------------------
-        # MODEL OPINIONS
+        # ANOMALY SIGNAL
+        # ----------------------------------------------------
+
+        if anomaly_prediction:
+
+            st.markdown(
+                '<div class="anomaly-box">'
+                '<div class="anomaly-title">'
+                'Unusual behavioural pattern detected'
+                '</div>'
+                '<div class="anomaly-copy">'
+                'The unsupervised Isolation Forest found '
+                'this message structurally unusual compared '
+                'with normal messages. This is an anomaly '
+                'signal, not proof that the message is spam.'
+                '</div>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
+
+        # ----------------------------------------------------
+        # ENGINE RESULTS
         # ----------------------------------------------------
 
         st.markdown(
             '<div style="margin-top:30px;" '
             'class="section-kicker">'
-            'MODEL OPINIONS'
+            'ANALYSIS ENGINES'
             '</div>',
             unsafe_allow_html=True,
         )
 
 
-        left, right = (
-            st.columns(2)
-        )
+        e1, e2, e3 = st.columns(3)
 
 
         ml_result = (
@@ -1043,12 +1157,19 @@ if analyse:
         )
 
 
-        with left:
+        anomaly_result = (
+            "Unusual pattern"
+            if anomaly_prediction
+            else "Typical pattern"
+        )
+
+
+        with e1:
 
             st.markdown(
                 '<div class="card">'
                 '<div class="card-label">'
-                'Classical machine learning'
+                'SUPERVISED ML'
                 '</div>'
                 f'<div class="card-value">'
                 f'{ml_result}'
@@ -1061,12 +1182,12 @@ if analyse:
             )
 
 
-        with right:
+        with e2:
 
             st.markdown(
                 '<div class="card">'
                 '<div class="card-label">'
-                'Deep learning'
+                'DEEP LEARNING'
                 '</div>'
                 f'<div class="card-value">'
                 f'{dl_result}'
@@ -1079,8 +1200,26 @@ if analyse:
             )
 
 
+        with e3:
+
+            st.markdown(
+                '<div class="card">'
+                '<div class="card-label">'
+                'UNSUPERVISED ML'
+                '</div>'
+                f'<div class="card-value">'
+                f'{anomaly_result}'
+                '</div>'
+                '<div class="card-note">'
+                'Isolation Forest / engineered features'
+                '</div>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
+
         # ----------------------------------------------------
-        # SIGNALS
+        # EXPLAINABLE SIGNALS
         # ----------------------------------------------------
 
         evidence = get_evidence(
@@ -1091,15 +1230,14 @@ if analyse:
         st.markdown(
             '<div class="section">'
             '<div class="section-kicker">'
-            'SIGNALS'
+            'EXPLAINABILITY'
             '</div>'
             '<div class="section-title">'
             'What caught the model\'s attention?'
             '</div>'
             '<div class="section-copy">'
-            'These translated or original English phrases '
-            'contributed toward the classical model\'s '
-            'suspicious classification.'
+            'These terms contributed toward the '
+            'classical model\'s suspicious classification.'
             '</div>'
             '</div>',
             unsafe_allow_html=True,
@@ -1135,19 +1273,17 @@ if analyse:
 
 
         # ----------------------------------------------------
-        # MODEL DETAILS
+        # TECHNICAL DETAILS
         # ----------------------------------------------------
 
         with st.expander(
-            "View model details"
+            "View technical model details"
         ):
 
-            d1, d2 = (
-                st.columns(2)
-            )
+            t1, t2, t3 = st.columns(3)
 
 
-            with d1:
+            with t1:
 
                 st.markdown(
                     "**Classical ML**"
@@ -1164,14 +1300,14 @@ if analyse:
                 if ml_calibrated:
 
                     st.write(
-                        f"Suspicious probability: "
+                        f"Probability: "
                         f"{ml_score * 100:.1f}%"
                     )
 
                 else:
 
                     st.write(
-                        f"Decision-derived display score: "
+                        f"Decision-derived score: "
                         f"{ml_score * 100:.1f}%"
                     )
 
@@ -1181,7 +1317,7 @@ if analyse:
                     )
 
 
-            with d2:
+            with t2:
 
                 st.markdown(
                     "**Deep Learning**"
@@ -1196,8 +1332,33 @@ if analyse:
                 )
 
                 st.write(
-                    f"Suspicious probability: "
+                    f"Probability: "
                     f"{dl_score * 100:.1f}%"
+                )
+
+
+            with t3:
+
+                st.markdown(
+                    "**Unsupervised ML**"
+                )
+
+                st.write(
+                    "Model: Isolation Forest"
+                )
+
+                st.write(
+                    "Input: 8 engineered behavioural features"
+                )
+
+                st.write(
+                    f"Anomaly decision score: "
+                    f"{anomaly_score:.3f}"
+                )
+
+                st.caption(
+                    "Lower Isolation Forest decision scores "
+                    "indicate more unusual observations."
                 )
 
 
@@ -1211,11 +1372,12 @@ st.markdown(
     'MODEL RESEARCH'
     '</div>'
     '<div class="section-title">'
-    'We didn\'t just train one model and call it AI.'
+    'We didn\'t train one model and call it AI.'
     '</div>'
     '<div class="section-copy">'
-    'Multiple classical models were evaluated, '
-    'then compared with a deep-learning approach.'
+    'Classical algorithms were compared using '
+    'multiple evaluation metrics and then tested '
+    'alongside a deep-learning model.'
     '</div>'
     '</div>',
     unsafe_allow_html=True,
@@ -1234,64 +1396,22 @@ if ML_RESULTS_PATH.exists():
         ].argmax()
     ]
 
+    r1, r2, r3 = st.columns(3)
 
-    m1, m2, m3 = (
-        st.columns(3)
+    r1.metric(
+        "Best classical model",
+        best_row["Model"]
     )
 
+    r2.metric(
+        "Classical accuracy",
+        f'{best_row["Accuracy"] * 100:.2f}%'
+    )
 
-    with m1:
-
-        st.markdown(
-            '<div class="card">'
-            '<div class="card-label">'
-            'Best classical model'
-            '</div>'
-            f'<div class="stat-number">'
-            f'{best_row["Model"]}'
-            '</div>'
-            '<div class="stat-label">'
-            'Selected using F1 score'
-            '</div>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-
-
-    with m2:
-
-        st.markdown(
-            '<div class="card">'
-            '<div class="card-label">'
-            'Classical ML accuracy'
-            '</div>'
-            f'<div class="stat-number">'
-            f'{best_row["Accuracy"] * 100:.2f}%'
-            '</div>'
-            '<div class="stat-label">'
-            'Test-set performance'
-            '</div>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-
-
-    with m3:
-
-        st.markdown(
-            '<div class="card">'
-            '<div class="card-label">'
-            'Classical ML F1'
-            '</div>'
-            f'<div class="stat-number">'
-            f'{best_row["F1 Score"] * 100:.2f}%'
-            '</div>'
-            '<div class="stat-label">'
-            'Precision / recall balance'
-            '</div>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
+    r3.metric(
+        "Classical F1",
+        f'{best_row["F1 Score"] * 100:.2f}%'
+    )
 
 
 if DL_RESULTS_PATH.exists():
@@ -1300,73 +1420,25 @@ if DL_RESULTS_PATH.exists():
         DL_RESULTS_PATH
     )
 
-    dl_row = (
-        dl_results.iloc[0]
+    dl_row = dl_results.iloc[0]
+
+    d1, d2, d3 = st.columns(3)
+
+    d1.metric(
+        "Deep model",
+        "BiLSTM"
     )
 
-
-    n1, n2, n3 = (
-        st.columns(3)
+    d2.metric(
+        "Deep accuracy",
+        f'{dl_row["Accuracy"] * 100:.2f}%'
     )
 
+    d3.metric(
+        "Deep F1",
+        f'{dl_row["F1 Score"] * 100:.2f}%'
+    )
 
-    with n1:
-
-        st.markdown(
-            '<div class="card">'
-            '<div class="card-label">'
-            'Neural architecture'
-            '</div>'
-            '<div class="stat-number">'
-            'BiLSTM'
-            '</div>'
-            '<div class="stat-label">'
-            'Deep-learning NLP model'
-            '</div>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-
-
-    with n2:
-
-        st.markdown(
-            '<div class="card">'
-            '<div class="card-label">'
-            'Deep-learning accuracy'
-            '</div>'
-            f'<div class="stat-number">'
-            f'{dl_row["Accuracy"] * 100:.2f}%'
-            '</div>'
-            '<div class="stat-label">'
-            'Test-set performance'
-            '</div>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-
-
-    with n3:
-
-        st.markdown(
-            '<div class="card">'
-            '<div class="card-label">'
-            'Deep-learning F1'
-            '</div>'
-            f'<div class="stat-number">'
-            f'{dl_row["F1 Score"] * 100:.2f}%'
-            '</div>'
-            '<div class="stat-label">'
-            'Higher accuracy isn\'t everything.'
-            '</div>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-
-
-# ============================================================
-# FULL RESULTS
-# ============================================================
 
 with st.expander(
     "View complete experiment results"
@@ -1394,7 +1466,6 @@ with st.expander(
                 table[column] = (
                     table[column] * 100
                 ).round(2)
-
 
         st.dataframe(
             table,
@@ -1426,7 +1497,6 @@ with st.expander(
                     table[column] * 100
                 ).round(2)
 
-
         st.dataframe(
             table,
             use_container_width=True,
@@ -1435,7 +1505,119 @@ with st.expander(
 
 
 # ============================================================
-# HOW IT WORKS
+# MODEL LAB
+# ============================================================
+
+st.markdown(
+    '<div class="section">'
+    '<div class="section-kicker">'
+    'MODEL LAB'
+    '</div>'
+    '<div class="section-title">'
+    'Data, experiments and model health.'
+    '</div>'
+    '<div class="section-copy">'
+    'A compact view of dataset statistics and '
+    'inference behaviour after deployment.'
+    '</div>'
+    '</div>',
+    unsafe_allow_html=True,
+)
+
+
+if STATS_PATH.exists():
+
+    stats = pd.read_csv(
+        STATS_PATH
+    ).iloc[0]
+
+    s1, s2, s3 = st.columns(3)
+
+    s1.metric(
+        "Dataset messages",
+        int(
+            stats[
+                "total_messages"
+            ]
+        )
+    )
+
+    s2.metric(
+        "Average message length",
+        f'{stats["average_message_length"]:.0f} chars'
+    )
+
+    s3.metric(
+        "Std. deviation",
+        f'{stats["std_message_length"]:.0f} chars'
+    )
+
+
+monitor_stats = (
+    get_monitoring_stats()
+)
+
+
+m1, m2, m3 = st.columns(3)
+
+m1.metric(
+    "Predictions analysed",
+    monitor_stats[
+        "total_predictions"
+    ]
+)
+
+m2.metric(
+    "ML / DL agreement",
+    f'{monitor_stats["agreement_rate"]}%'
+)
+
+m3.metric(
+    "Suspicious predictions",
+    f'{monitor_stats["suspicious_rate"]}%'
+)
+
+
+st.markdown(
+    '<div class="lab-note">'
+    'Monitoring stores prediction metadata such as '
+    'model outputs and agreement rates. '
+    '<b>The original message text is not stored.</b>'
+    '</div>',
+    unsafe_allow_html=True,
+)
+
+
+with st.expander(
+    "View dataset analysis"
+):
+
+    if CLASS_CHART_PATH.exists():
+
+        st.image(
+            str(
+                CLASS_CHART_PATH
+            ),
+            caption=(
+                "Class distribution"
+            ),
+        )
+
+
+    if LENGTH_CHART_PATH.exists():
+
+        st.image(
+            str(
+                LENGTH_CHART_PATH
+            ),
+            caption=(
+                "Message length distribution"
+            ),
+        )
+
+
+# ============================================================
+# PIPELINE
 # ============================================================
 
 st.markdown(
@@ -1444,40 +1626,30 @@ st.markdown(
     'UNDER THE HOOD'
     '</div>'
     '<div class="section-title">'
-    'Any language in. Two models out.'
+    'One message. Three analytical views.'
     '</div>'
     '<div class="section-copy">'
-    'Non-English input is detected and translated '
-    'before reaching the existing English-trained '
-    'ML and deep-learning models.'
+    'Supervised learning predicts known classes, '
+    'deep learning learns sequential text patterns, '
+    'and unsupervised learning looks for unusual behaviour.'
     '</div>'
     '</div>',
     unsafe_allow_html=True,
 )
 
 
-s1, a1, s2, a2, s3, a3, s4 = (
-    st.columns(
-        [
-            1.7,
-            0.35,
-            1.7,
-            0.35,
-            2.2,
-            0.35,
-            1.7,
-        ]
-    )
+p1, a1, p2, a2, p3 = st.columns(
+    [2, 0.4, 3, 0.4, 2]
 )
 
 
-with s1:
+with p1:
 
     st.markdown(
         '<div class="flow-item">'
         'MESSAGE'
         '<span class="flow-sub">'
-        'Any supported language'
+        'Language detection + normalization'
         '</span>'
         '</div>',
         unsafe_allow_html=True,
@@ -1494,13 +1666,13 @@ with a1:
     )
 
 
-with s2:
+with p2:
 
     st.markdown(
         '<div class="flow-item">'
-        'LANGUAGE'
+        'THREE ENGINES'
         '<span class="flow-sub">'
-        'Detect + translate'
+        'Linear SVM / BiLSTM / Isolation Forest'
         '</span>'
         '</div>',
         unsafe_allow_html=True,
@@ -1517,36 +1689,13 @@ with a2:
     )
 
 
-with s3:
+with p3:
 
     st.markdown(
         '<div class="flow-item">'
-        'DUAL ANALYSIS'
+        'RESULT'
         '<span class="flow-sub">'
-        'TF-IDF + SVM / BiLSTM'
-        '</span>'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-
-
-with a3:
-
-    st.markdown(
-        '<div class="arrow">'
-        '→'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-
-
-with s4:
-
-    st.markdown(
-        '<div class="flow-item">'
-        'VERDICT'
-        '<span class="flow-sub">'
-        'Classification + evidence'
+        'Classification + anomaly + evidence'
         '</span>'
         '</div>',
         unsafe_allow_html=True,
@@ -1562,39 +1711,48 @@ with st.expander(
 ):
 
     st.write(
-        "**Core stack:** Python, Pandas, "
-        "Scikit-learn, TensorFlow/Keras, "
-        "TF-IDF, Linear SVM, BiLSTM and Streamlit."
+        "**Supervised ML:** Logistic Regression, "
+        "Linear SVM and Random Forest."
     )
 
     st.write(
-        "**Multilingual layer:** LangDetect + "
+        "**Deep Learning:** TensorFlow/Keras BiLSTM."
+    )
+
+    st.write(
+        "**Unsupervised ML:** Isolation Forest trained "
+        "on engineered behavioural features from normal messages."
+    )
+
+    st.write(
+        "**Feature engineering:** message length, word count, "
+        "digit statistics, uppercase ratio, special-character "
+        "count, URL count and urgency indicators."
+    )
+
+    st.write(
+        "**EDA:** Pandas, Matplotlib and Seaborn."
+    )
+
+    st.write(
+        "**Multilingual layer:** language detection and "
         "translation-assisted English normalization."
     )
 
     st.write(
-        "**Training dataset:** labelled English "
-        "SMS spam/ham data."
+        "**Monitoring:** inference metadata, model agreement "
+        "and prediction distribution. Raw message text is not logged."
     )
 
     st.write(
-        "**Important:** The SVM and BiLSTM models "
-        "were trained on English data. Non-English "
-        "messages are translated into English before "
-        "classification."
+        "**Important limitation:** the primary classifiers were "
+        "trained on English SMS spam/ham data. Translation can alter "
+        "context, slang and code-mixed language."
     )
 
     st.write(
-        "**Limitation:** Translation can alter slang, "
-        "code-mixed text, cultural context and "
-        "scam-specific wording. Performance has not "
-        "been independently validated for every language."
-    )
-
-    st.write(
-        "NeuroShield is an educational AI/ML prototype "
-        "and should not be treated as a definitive "
-        "fraud-detection system."
+        "NeuroShield is an educational AI/ML prototype and "
+        "should not be treated as a definitive fraud-detection system."
     )
 
 
@@ -1606,9 +1764,8 @@ st.markdown(
     '<div class="footer-wrap">'
     '<b>NEUROSHIELD / 2026</b>'
     '<br><br>'
-    'Built with machine learning, deep learning, '
-    'multilingual NLP, and a healthy distrust '
-    'of urgent links.'
+    'Supervised ML. Deep learning. Unsupervised detection. '
+    'A healthy distrust of urgent links.'
     '</div>',
     unsafe_allow_html=True,
 )
