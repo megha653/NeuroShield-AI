@@ -1,0 +1,5 @@
+{
+    "max_words": 10000,
+    "max_length": 80,
+    "embedding_dim": 64
+}

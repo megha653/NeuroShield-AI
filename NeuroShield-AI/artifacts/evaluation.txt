@@ -1,0 +1,43 @@
+
+NEUROSHIELD AI
+MODEL EVALUATION REPORT
+============================================================
+
+Dataset Size:
+5158
+
+Training Samples:
+3868
+
+Testing Samples:
+1290
+
+TF-IDF Features:
+5000
+
+Best Model:
+Linear SVM
+
+MODEL COMPARISON
+------------------------------------------------------------
+              Model  Accuracy  Precision   Recall  F1 Score
+         Linear SVM  0.978295   0.977977 0.978295  0.977868
+Logistic Regression  0.977519   0.977279 0.977519  0.977367
+      Random Forest  0.966667   0.967890 0.966667  0.964409
+
+CLASSIFICATION REPORT
+------------------------------------------------------------
+              precision    recall  f1-score   support
+
+           0      0.982     0.994     0.988      1129
+           1      0.952     0.870     0.909       161
+
+    accuracy                          0.978      1290
+   macro avg      0.967     0.932     0.948      1290
+weighted avg      0.978     0.978     0.978      1290
+
+
+CONFUSION MATRIX
+------------------------------------------------------------
+[[1122    7]
+ [  21  140]]
